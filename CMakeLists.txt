@@ -18,11 +18,13 @@ add_library(aegis_transport STATIC
   src/mlkem_ntt.cpp
   src/mlkem_sample.cpp
   src/mlkem768.cpp
+  src/aead.cpp
+  src/session.cpp
 )
 target_include_directories(aegis_transport PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 enable_testing()
-foreach(t keccak mlkem_ntt mlkem_sample mlkem768 mlkem_kat)
+foreach(t keccak mlkem_ntt mlkem_sample mlkem768 mlkem_kat aead session)
   add_executable(test_${t} tests/test_${t}.cpp)
   target_link_libraries(test_${t} PRIVATE aegis_transport)
   add_test(NAME ${t} COMMAND test_${t})
