@@ -101,3 +101,41 @@ Bootstrapping needs log2(QP) ~ 2050, forcing n=131072 and far more than 6 GB.
 A 3-level inference circuit needs 352 bits and fits comfortably. Shallow
 encrypted inference is deployable on consumer hardware today; bootstrapped
 FHE is not.
+
+## F3 — Ciphertext transport is free; KEY provisioning is not.
+
+F1 found link time irrelevant next to FHE compute. Closing the loop into a
+client/server system inverts that for one specific step.
+
+The client must hold the CKKS secret key, so the server needs evaluation
+keys: 60 rotation keys plus one relinearisation key.
+
+| ring   | per rotation key | 60 keys | AEAD seal time @0.46 GB/s |
+|--------|------------------|---------|---------------------------|
+| 1024   | 0.33 MB          |  20 MB  | ~43 s                     |
+| 16384  | 5.3 MB           | 316 MB  | ~11 min                   |
+
+Against a 2 MB inference ciphertext (4.6 ms to seal), provisioning is four
+orders of magnitude larger. So:
+
+1. Provision once per client/server pair and keep the session alive. Do NOT
+   re-handshake per inference.
+2. The AEAD throughput lever (F1, item 3) is worth ~11 minutes of wall clock
+   here, not the milliseconds it was worth for ciphertexts.
+
+### Parsing untrusted key material
+The server deserialises evaluation keys supplied by a client it does not
+trust. Every read is bounds-checked; declared lengths are checked against
+server-side limits before any allocation.
+
+A corruption test aimed at the wrong byte offset found a genuine
+out-of-bounds read: the `fullQ` field was unvalidated, and the eval-key index
+`(i >= sizeQl) ? i + delta : i` with `delta = fullQ - sizeQl` reads past the
+end of the key for inflated values. Now bounded by
+`sizeQl <= fullQ <= maxtowers` and `evalKeyTowers >= fullQ + sizeP`.
+
+Gate (tests/test_keyser.cpp, 17 checks): exact field-for-field round trip,
+rejection at every truncation length, header-corruption rejection, header/
+array cross-checks, and 400 randomly corrupted blobs parsed without crashing.
+Corrupted-value blobs may deserialise successfully -- that is correct, since
+integrity is the AEAD tag's job, not the parser's.
