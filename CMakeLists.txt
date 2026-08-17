@@ -45,3 +45,26 @@ add_executable(test_mlp_packed tests/test_mlp_packed.cpp)
 target_link_libraries(test_mlp_packed PRIVATE aegis_ml)
 add_test(NAME mlp_packed COMMAND test_mlp_packed
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---- GPU-Resident-Library (built separately, see tools/build_gpufhe.sh) ----
+set(GPUFHE_LIB ${CMAKE_CURRENT_SOURCE_DIR}/build-gpufhe/libgpufhe.a)
+if(EXISTS ${GPUFHE_LIB})
+  find_package(CUDAToolkit REQUIRED)
+  add_library(gpufhe STATIC IMPORTED)
+  set_target_properties(gpufhe PROPERTIES
+    IMPORTED_LOCATION ${GPUFHE_LIB}
+    INTERFACE_INCLUDE_DIRECTORIES
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gpufhe/include)
+
+  # Must be a CUDA target: gpufhe is built with CUDA_SEPARABLE_COMPILATION,
+  # so its device code is relocatable and needs a device-link step. A plain
+  # C++ executable linking this .a fails with unresolved device symbols.
+  add_executable(infer_encrypted tools/infer_encrypted.cu)
+  set_target_properties(infer_encrypted PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  target_link_libraries(infer_encrypted PRIVATE gpufhe aegis_ml CUDA::cudart)
+else()
+  message(STATUS "libgpufhe.a not found -- run tools/build_gpufhe.sh "
+                 "to enable encrypted inference targets")
+endif()
