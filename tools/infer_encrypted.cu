@@ -29,6 +29,16 @@ static uint64_t madd(uint64_t a, uint64_t b, uint64_t q) {
 
 // ---- parameters ----
 static uint32_t N = 1024, SL = 512;           // ring / slots, set from argv
+static int g_resident = 0;                    // 0 = host path, 1 = resident
+
+// Same signature both ways, so this is a pure dispatch. The resident path is
+// gated bit-exact against the host path inside the library.
+static void rot(std::vector<uint64_t>& c0, std::vector<uint64_t>& c1, uint32_t k,
+                const gpufhe::KeySwitchConstants& K, uint32_t tw, uint32_t n,
+                const std::vector<uint64_t>& mod, const std::vector<uint64_t>& root) {
+    if (g_resident) gpufhe::rotate_ct_resident(c0, c1, k, K, tw, n, mod, root);
+    else            gpufhe::rotate_ct_host(c0, c1, k, K, tw, n, mod, root);
+}
 static const uint32_t PER = SLOTS;            // 256-periodic replication
 static const uint32_t SIZEQ = 5, SIZEP = 2, NUMPART = 3;
 static const uint64_t NS = 1;
@@ -221,8 +231,7 @@ static CtPair bsgs(const CtPair& in, const DiagSet& D,
     B[0] = in;
     for (int b = 1; b < BS_N1; b++) {
         B[b] = in;
-        gpufhe::rotate_ct_host(B[b].c0, B[b].c1, autok(c.n, b), rk[b],
-                               L.tw, c.n, L.mod, L.root);
+        rot(B[b].c0, B[b].c1, autok(c.n, b), rk[b], L.tw, c.n, L.mod, L.root);
     }
     CtPair acc; acc.c0.assign(T, 0); acc.c1.assign(T, 0);
     bool got = false;
@@ -238,8 +247,8 @@ static CtPair bsgs(const CtPair& in, const DiagSet& D,
             else gpufhe::ct_add_ct_host(inner.c0, inner.c1, p.c0, p.c1, L.tw, c.n, L.mod);
         }
         if (!any) continue;
-        if (shift) gpufhe::rotate_ct_host(inner.c0, inner.c1, autok(c.n, shift),
-                                          rk[shift], L.tw, c.n, L.mod, L.root);
+        if (shift) rot(inner.c0, inner.c1, autok(c.n, shift), rk[shift],
+                       L.tw, c.n, L.mod, L.root);
         if (!got) { acc = inner; got = true; }
         else gpufhe::ct_add_ct_host(acc.c0, acc.c1, inner.c0, inner.c1, L.tw, c.n, L.mod);
     }
@@ -289,9 +298,11 @@ int main(int argc, char** argv) {
     int stage = (argc > 1) ? std::atoi(argv[1]) : 3;
     int nimg  = (argc > 2) ? std::atoi(argv[2]) : 1;
     if (argc > 3) { N = (uint32_t)std::atoi(argv[3]); SL = N / 2; }
+    if (argc > 4) g_resident = std::atoi(argv[4]);
     if (N < 2 * PER) { std::printf("ring too small for period %u\n", PER); return 2; }
-    std::printf("ring n=%u  slots=%u  period=%u  log2(QP)=%u\n",
-                N, SL, PER, SIZEQ * 50 + SIZEP * 51);
+    std::printf("ring n=%u  slots=%u  period=%u  log2(QP)=%u  rotation=%s\n",
+                N, SL, PER, SIZEQ * 50 + SIZEP * 51,
+                g_resident ? "RESIDENT" : "host");
 
     MLP m;
     if (!mlp_load(m, "models/mlp.txt")) { std::printf("run train_mlp first\n"); return 2; }

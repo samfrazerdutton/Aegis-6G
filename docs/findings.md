@@ -67,9 +67,17 @@ BIT-IDENTICAL output (4.849e-07 before and after), which is what distinguishes
 a correctness-preserving speedup from a different computation that happens
 to pass.
 
+### Second optimisation: resident rotation (done)
+Switching rotations to the library's device-resident keyswitch gave 1.30x
+(4.8 -> 3.65 s/image), again bit-identical. Less than the 1.58x measured at
+n=8192/tw=30, because rotate_ct_resident still builds a DeviceKSContext on
+every call: at tw=5 the kernel work it saves shrank while that fixed setup
+did not. Cumulative: 240 -> 3.65 s/image = 65x.
+
 ### Remaining levers (measured, not speculative)
-1. Rotations use the host-orchestrated keyswitch path; the library's fully
-   device-resident path measured 1.58x faster at n=8192 and is unused here.
+1. 60 device contexts are built and destroyed per image. rotate_ct_device
+   accepts a caller-owned context; caching one per rotation key should
+   recover most of the ~36% the library measures as setup+teardown.
 2. encode_host is O(N^2); an FFT encode would cut the 223 s setup to seconds.
 3. Batching 32 images across 8192 slots would amortise per-image cost, but
    naive block packing breaks under cyclic rotation -- needs masking or

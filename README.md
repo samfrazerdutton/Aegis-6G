@@ -15,12 +15,12 @@ its specification and gated against external test vectors where they exist.
 | AEAD + session + TCP transport | **Done — RFC 8439 vectors + 18 protocol gates** |
 | Network cost characterisation | **Done — see `docs/findings.md`** |
 | GPU CKKS engine | Provided by [GPU-Resident-Library](https://github.com/samfrazerdutton/GPU-Resident-Library) (submodule) |
-| Encrypted MNIST inference | **Done — 4.8 s/image at 163-bit security, matches plaintext decisions** |
+| Encrypted MNIST inference | **Done — 3.7 s/image at 163-bit security, matches plaintext decisions** |
 
 ## Headline results
 
 **Encrypted MNIST inference at 163-bit classical / 151-bit quantum security
-in 4.8 s/image on an RTX 2060 Max-Q (6 GB).** A 196->64->10 square-activation
+in 3.7 s/image on an RTX 2060 Max-Q (6 GB).** A 196->64->10 square-activation
 MLP (97.15% plaintext accuracy) evaluated entirely under CKKS -- no
 bootstrapping, no decryption mid-circuit -- reproducing the plaintext model's
 predictions exactly. Security estimated with a primal-uSVP tool re-validated
