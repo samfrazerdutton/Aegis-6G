@@ -34,3 +34,14 @@ endforeach()
 
 add_executable(bench_transport bench/bench_transport.cpp)
 target_link_libraries(bench_transport PRIVATE aegis_transport Threads::Threads)
+
+add_library(aegis_ml STATIC src/mnist.cpp src/mlp.cpp)
+target_include_directories(aegis_ml PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(train_mlp tools/train_mlp.cpp)
+target_link_libraries(train_mlp PRIVATE aegis_ml)
+
+add_executable(test_mlp_packed tests/test_mlp_packed.cpp)
+target_link_libraries(test_mlp_packed PRIVATE aegis_ml)
+add_test(NAME mlp_packed COMMAND test_mlp_packed
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})

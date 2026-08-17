@@ -1,2 +1,4 @@
 tests/kat/*.json
 build/
+data/
+models/*.txt
