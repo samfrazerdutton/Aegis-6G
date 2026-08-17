@@ -59,6 +59,18 @@ if(EXISTS ${GPUFHE_LIB})
   # Must be a CUDA target: gpufhe is built with CUDA_SEPARABLE_COMPILATION,
   # so its device code is relocatable and needs a device-link step. A plain
   # C++ executable linking this .a fails with unresolved device symbols.
+  add_library(aegis_keyser STATIC src/keyser.cpp)
+  target_include_directories(aegis_keyser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(aegis_keyser PUBLIC gpufhe)
+
+  add_executable(test_keyser tests/test_keyser.cpp)
+  set_target_properties(test_keyser PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    LINKER_LANGUAGE CUDA)
+  target_link_libraries(test_keyser PRIVATE aegis_keyser gpufhe CUDA::cudart)
+  add_test(NAME keyser COMMAND test_keyser
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
   add_executable(infer_encrypted tools/infer_encrypted.cu)
   set_target_properties(infer_encrypted PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
