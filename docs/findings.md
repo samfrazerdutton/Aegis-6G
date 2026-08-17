@@ -50,11 +50,11 @@ in-session against the HES 2018 128-bit table. log2(QP) = 352
 
 | ring   | classical | quantum | per image | worst logit err |
 |--------|-----------|---------|-----------|-----------------|
-| 1024   |  44.3     |  43.0   |  0.39 s   | 1.5e-08         |
-| 16384  | 163.1     | 151.2   |  4.8 s    | 4.8e-07         |
+| 1024   |  44.3     |  43.0   |  0.12 s   | 1.5e-08         |
+| 16384  | 163.1     | 151.2   |  2.46 s   | 4.8e-07         |
 
 n=8192 gives only 77.7 bits, so n=16384 is the SMALLEST secure ring here --
-4.8 s is the cost of security, not a conservative choice.
+2.46 s is the cost of security, not a conservative choice.
 Argmax agreement with the plaintext model: 3/3 at n=16384, 20/20 at n=1024.
 One-time per model: keys 4.0 s, diagonal encoding 223 s.
 
@@ -74,10 +74,23 @@ n=8192/tw=30, because rotate_ct_resident still builds a DeviceKSContext on
 every call: at tw=5 the kernel work it saves shrank while that fixed setup
 did not. Cumulative: 240 -> 3.65 s/image = 65x.
 
+### Third optimisation: device-resident BSGS (done)
+Caching one DeviceKSContext per rotation amount and keeping every diagonal
+in VRAM lets a whole BSGS layer run without crossing PCIe: 3.65 -> 2.46
+s/image (1.48x), bit-identical. At n=1024 the gain is 2.5x, since per-call
+setup was a larger share of a smaller rotation.
+
+**Cumulative: 240 -> 2.46 s/image = 98x, every step bit-identical.**
+
+VRAM: 1569 MB of 6144 at n=16384 -- but 1071 MB of that is already present
+at n=1024, so ~1 GB is fixed per-context overhead independent of ring size.
+The binding constraint on context caching is the NUMBER of rotation keys,
+not the ring dimension.
+
 ### Remaining levers (measured, not speculative)
-1. 60 device contexts are built and destroyed per image. rotate_ct_device
-   accepts a caller-owned context; caching one per rotation key should
-   recover most of the ~36% the library measures as setup+teardown.
+1. encode_host is O(N^2). The one-time diagonal encode is 223 s, now ~96%
+   of a 3-image run's wall time. An FFT encode would cut it to seconds.
+   Per-model, not per-image -- so it changes the setup story, not latency.
 2. encode_host is O(N^2); an FFT encode would cut the 223 s setup to seconds.
 3. Batching 32 images across 8192 slots would amortise per-image cost, but
    naive block packing breaks under cyclic rotation -- needs masking or

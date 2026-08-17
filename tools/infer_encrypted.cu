@@ -6,6 +6,7 @@
 #include "keyswitch.h"
 #include "keyswitch_resident.h"
 #include "keygen.h"
+#include "stage_acc.h"
 #include "mlp.h"
 #include <cuda_runtime.h>
 #include <cmath>
@@ -197,6 +198,19 @@ static void rescale(CtPair& ct, Ctx& c, const Level& L,
     ct.c0.resize(Tn); ct.c1.resize(Tn);
 }
 
+// Device-resident BSGS state: one KS context per rotation amount, plus every
+// diagonal already in VRAM. Nothing crosses PCIe inside a layer.
+struct DevLayer {
+    std::map<uint32_t, gpufhe::DeviceKSContext> ctx;
+    gpufhe::DeviceKSWork W{};
+    std::vector<uint64_t*> d_ev;          // per k, null if zero diagonal
+    uint64_t *d_x0=nullptr, *d_x1=nullptr, *d_a0=nullptr, *d_a1=nullptr;
+    uint64_t *d_i0=nullptr, *d_i1=nullptr, *d_b0=nullptr, *d_b1=nullptr;
+    uint64_t *d_sc=nullptr;
+    std::vector<uint64_t*> d_B0, d_B1;    // baby rotations
+    uint32_t tw=0;
+};
+
 // Precomputed BSGS diagonals in eval form. Model constants -- encoded ONCE.
 struct DiagSet {
     std::vector<std::vector<uint64_t>> ev;   // per k, empty if zero diagonal
@@ -220,6 +234,79 @@ static DiagSet encode_diags(const std::vector<std::vector<double>>& D,
         gpufhe::pt_to_eval_host(ds.ev[k], md, L.tw, c.n, L.mod, L.root);
     }
     return ds;
+}
+
+static void devlayer_init(DevLayer& D, Ctx& c, const Level& L,
+                          std::map<uint32_t, gpufhe::KeySwitchConstants>& rk,
+                          const DiagSet& ds) {
+    D.tw = L.tw;
+    size_t T = (size_t)L.tw * c.n, B = T * 8;
+    for (auto& kv : rk) D.ctx[kv.first] = gpufhe::ks_context_create(kv.second);
+    D.W = gpufhe::ks_work_create(D.ctx.begin()->second);
+    D.d_ev.assign(SLOTS, nullptr);
+    for (int k = 0; k < SLOTS; k++) {
+        if (ds.ev[k].empty()) continue;
+        cudaMalloc(&D.d_ev[k], B);
+        cudaMemcpy(D.d_ev[k], ds.ev[k].data(), B, cudaMemcpyHostToDevice);
+    }
+    cudaMalloc(&D.d_x0, B); cudaMalloc(&D.d_x1, B);
+    cudaMalloc(&D.d_a0, B); cudaMalloc(&D.d_a1, B);
+    cudaMalloc(&D.d_i0, B); cudaMalloc(&D.d_i1, B);
+    cudaMalloc(&D.d_b0, B); cudaMalloc(&D.d_b1, B);
+    cudaMalloc(&D.d_sc, (size_t)c.n * 8);
+    D.d_B0.resize(BS_N1); D.d_B1.resize(BS_N1);
+    for (int b = 0; b < BS_N1; b++) {
+        cudaMalloc(&D.d_B0[b], B); cudaMalloc(&D.d_B1[b], B);
+    }
+}
+
+// Fully device-resident BSGS. Host ciphertext in, host ciphertext out; every
+// rotation, multiply and accumulation between those points stays in VRAM.
+static CtPair bsgs_device(const CtPair& in, const DiagSet& ds, Ctx& c,
+                          const Level& L, DevLayer& D) {
+    size_t T = (size_t)L.tw * c.n, B = T * 8;
+    cudaMemcpy(D.d_x0, in.c0.data(), B, cudaMemcpyHostToDevice);
+    cudaMemcpy(D.d_x1, in.c1.data(), B, cudaMemcpyHostToDevice);
+
+    for (int b = 0; b < BS_N1; b++) {
+        cudaMemcpy(D.d_B0[b], D.d_x0, B, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(D.d_B1[b], D.d_x1, B, cudaMemcpyDeviceToDevice);
+        if (b) gpufhe::rotate_ct_device(D.d_B0[b], D.d_B1[b], autok(c.n, b),
+                                        D.ctx[b], D.W, L.tw, c.n, L.mod, L.root,
+                                        D.d_sc, D.d_b0, D.d_b1, 0);
+    }
+
+    cudaMemset(D.d_a0, 0, B); cudaMemset(D.d_a1, 0, B);
+    for (int g = 0; g < BS_N2; g++) {
+        int shift = g * BS_N1;
+        cudaMemset(D.d_i0, 0, B); cudaMemset(D.d_i1, 0, B);
+        bool any = false;
+        for (int b = 0; b < BS_N1; b++) {
+            int k = shift + b;
+            if (!D.d_ev[k]) continue;
+            for (uint32_t t = 0; t < L.tw; t++) {
+                size_t o = (size_t)t * c.n;
+                LaunchPtMulAcc(D.d_i0 + o, D.d_i1 + o,
+                               D.d_B0[b] + o, D.d_B1[b] + o,
+                               D.d_ev[k] + o, L.mod[t], c.n, 0);
+            }
+            any = true;
+        }
+        if (!any) continue;
+        if (shift) gpufhe::rotate_ct_device(D.d_i0, D.d_i1, autok(c.n, shift),
+                                            D.ctx[shift], D.W, L.tw, c.n,
+                                            L.mod, L.root, D.d_sc, D.d_b0, D.d_b1, 0);
+        for (uint32_t t = 0; t < L.tw; t++) {
+            size_t o = (size_t)t * c.n;
+            LaunchAddInto(D.d_a0 + o, D.d_i0 + o, L.mod[t], c.n, 0);
+            LaunchAddInto(D.d_a1 + o, D.d_i1 + o, L.mod[t], c.n, 0);
+        }
+    }
+    cudaDeviceSynchronize();
+    CtPair out; out.c0.resize(T); out.c1.resize(T);
+    cudaMemcpy(out.c0.data(), D.d_a0, B, cudaMemcpyDeviceToHost);
+    cudaMemcpy(out.c1.data(), D.d_a1, B, cudaMemcpyDeviceToHost);
+    return out;
 }
 
 // y = sum_k diag_k (x) rot_k(x), BSGS factored.
@@ -302,7 +389,7 @@ int main(int argc, char** argv) {
     if (N < 2 * PER) { std::printf("ring too small for period %u\n", PER); return 2; }
     std::printf("ring n=%u  slots=%u  period=%u  log2(QP)=%u  rotation=%s\n",
                 N, SL, PER, SIZEQ * 50 + SIZEP * 51,
-                g_resident ? "RESIDENT" : "host");
+                g_resident==2 ? "DEVICE" : (g_resident ? "resident" : "host"));
 
     MLP m;
     if (!mlp_load(m, "models/mlp.txt")) { std::printf("run train_mlp first\n"); return 2; }
@@ -362,6 +449,16 @@ int main(int argc, char** argv) {
     if (stage >= 3) E2 = encode_diags(D2r, D40, c, L3);
     std::printf("diagonal encode  %.0f ms (one-time, model constants)\n\n", ms(t0));
 
+    DevLayer DL1, DL3;
+    if (g_resident == 2) {
+        t0 = clk::now();
+        devlayer_init(DL1, c, L5, rk5, E1);
+        if (stage >= 3) devlayer_init(DL3, c, L3, rk3, E2);
+        size_t freeB = 0, totB = 0; cudaMemGetInfo(&freeB, &totB);
+        std::printf("device layers    %.0f ms   VRAM used %.0f MB of %.0f MB\n\n",
+                    ms(t0), (totB - freeB) / 1048576.0, totB / 1048576.0);
+    }
+
     double worst = 0; int agree = 0, correct = 0;
 
     for (int img = 0; img < nimg; img++) {
@@ -373,7 +470,8 @@ int main(int argc, char** argv) {
                              c.mod, c.root, NS, SIGMA, 909 + img);
 
         auto tinf = clk::now();
-        ct = bsgs(ct, E1, c, L5, rk5);
+        ct = (g_resident == 2) ? bsgs_device(ct, E1, c, L5, DL1)
+                               : bsgs(ct, E1, c, L5, rk5);
         rescale(ct, c, L5, C5, dr0, dr1, scr, drp);         // -> tw 4, scale 2^50
         add_pt(ct, b1v, D50, c, L4);
 
@@ -385,7 +483,8 @@ int main(int argc, char** argv) {
             rescale(ct, c, L4, C4, dr0, dr1, scr, drp);     // -> tw 3, scale 2^50
             if (stage == 2) got = decrypt_slots(ct, c, L3, D50);
             else {
-                ct = bsgs(ct, E2, c, L3, rk3);              // scale 2^90
+                ct = (g_resident == 2) ? bsgs_device(ct, E2, c, L3, DL3)
+                                       : bsgs(ct, E2, c, L3, rk3);
                 rescale(ct, c, L3, C3, dr0, dr1, scr, drp); // -> tw 2, scale 2^40
                 add_pt(ct, b2v, D40, c, L2);
                 got = decrypt_slots(ct, c, L2, D40);
