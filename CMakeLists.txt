@@ -71,11 +71,17 @@ if(EXISTS ${GPUFHE_LIB})
   add_test(NAME keyser COMMAND test_keyser
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+  add_executable(aegis_demo tools/aegis_demo.cu)
+  set_target_properties(aegis_demo PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  target_link_libraries(aegis_demo PRIVATE gpufhe aegis_ml aegis_keyser
+                        aegis_transport CUDA::cudart Threads::Threads)
+
   add_executable(infer_encrypted tools/infer_encrypted.cu)
   set_target_properties(infer_encrypted PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-  target_link_libraries(infer_encrypted PRIVATE gpufhe aegis_ml CUDA::cudart)
+  target_link_libraries(infer_encrypted PRIVATE gpufhe aegis_ml aegis_keyser CUDA::cudart)
 else()
   message(STATUS "libgpufhe.a not found -- run tools/build_gpufhe.sh "
                  "to enable encrypted inference targets")

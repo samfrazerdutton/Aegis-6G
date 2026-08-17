@@ -139,3 +139,35 @@ rejection at every truncation length, header-corruption rejection, header/
 array cross-checks, and 400 randomly corrupted blobs parsed without crashing.
 Corrupted-value blobs may deserialise successfully -- that is correct, since
 integrity is the AEAD tag's job, not the parser's.
+
+## F4 — End-to-end: encrypted inference over a post-quantum channel.
+
+tools/aegis_demo.cu. Client holds the CKKS secret key; server holds the model
+weights. Neither learns the other's. Everything on the wire is ML-KEM-768 +
+ChaCha20-Poly1305.
+
+At n=1024: 3/3 argmax agreement, worst logit error 1.481e-08 -- identical to
+the local no-socket path, so the transport is transparent.
+61 evaluation keys (14.8 MB) provisioned in 1.5 s; server 125 ms/image;
+client round trip 115-188 ms.
+
+The server never holds the secret key, the plaintext image, or the plaintext
+logits.
+
+### gpufhe is not thread-safe
+The first version ran client and server as two threads in one process and
+produced garbage: error ~1e4, 0/3 argmax agreement. GPU-Resident-Library
+keeps process-global caches (device root tables keyed by (n,q), the
+keyswitch-constants cache) written without concurrency in mind. Two threads
+touching them corrupts results rather than crashing, so it presents as a
+crypto bug.
+
+Anything wanting concurrent evaluation needs per-process isolation or locks
+around those caches. The demo forks -- and the fork must precede any CUDA
+call, since a CUDA context does not survive fork.
+
+### Debugging technique worth reusing
+When two paths disagree, make the WORKING path adopt the suspect component
+rather than debugging the broken one. Adding serialize/deserialize/compare to
+the local inference driver kept results bit-identical, exonerating the
+serializer in a single run and leaving only the demo's plumbing.
