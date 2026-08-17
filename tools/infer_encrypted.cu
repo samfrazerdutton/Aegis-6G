@@ -28,14 +28,14 @@ static uint64_t madd(uint64_t a, uint64_t b, uint64_t q) {
 }
 
 // ---- parameters ----
-static const uint32_t N = 1024, SL = N / 2;   // 512 ciphertext slots
+static uint32_t N = 1024, SL = 512;           // ring / slots, set from argv
 static const uint32_t PER = SLOTS;            // 256-periodic replication
 static const uint32_t SIZEQ = 5, SIZEP = 2, NUMPART = 3;
 static const uint64_t NS = 1;
 static const double   SIGMA = 3.19;
 
 struct Ctx {
-    uint32_t n = N, sizeQ = SIZEQ, sizeP = SIZEP, sizeQlP = SIZEQ + SIZEP;
+    uint32_t n = 0, sizeQ = SIZEQ, sizeP = SIZEP, sizeQlP = SIZEQ + SIZEP;
     std::vector<uint64_t> mod, modP, modQP, root, rootQP, PModq_QP;
     gpufhe::KeyPairHost KPqp, KPq;
     std::map<uint32_t, gpufhe::KeySwitchConstants> rotk;   // by rotation amount
@@ -49,6 +49,7 @@ static std::vector<std::complex<double>> repl(const std::vector<double>& v) {
 }
 
 static void setup(Ctx& c) {
+    c.n = N;
     gpufhe::set_secret_hamming_weight(0);          // uniform ternary
     gpufhe::native_primes(c.mod,  c.sizeQ, 50, c.n, {});
     gpufhe::native_primes(c.modP, c.sizeP, 51, c.n, c.mod);
@@ -186,9 +187,34 @@ static void rescale(CtPair& ct, Ctx& c, const Level& L,
     ct.c0.resize(Tn); ct.c1.resize(Tn);
 }
 
+// Precomputed BSGS diagonals in eval form. Model constants -- encoded ONCE.
+struct DiagSet {
+    std::vector<std::vector<uint64_t>> ev;   // per k, empty if zero diagonal
+};
+
+static DiagSet encode_diags(const std::vector<std::vector<double>>& D,
+                            double dscale, Ctx& c, const Level& L) {
+    DiagSet ds; ds.ev.resize(SLOTS);
+    for (int k = 0; k < SLOTS; k++) {
+        bool nz = false;
+        for (int i = 0; i < SLOTS; i++) if (D[k][i] != 0.0) { nz = true; break; }
+        if (!nz) continue;
+        int shift = (k / BS_N1) * BS_N1;      // giant-step shift for this k
+        std::vector<double> dp(PER);
+        for (int i = 0; i < (int)PER; i++) {
+            int t = i - shift; if (t < 0) t += SLOTS;
+            dp[i] = D[k][t];
+        }
+        std::vector<int64_t> md;
+        gpufhe::encode_host(md, repl(dp), c.n, dscale);
+        gpufhe::pt_to_eval_host(ds.ev[k], md, L.tw, c.n, L.mod, L.root);
+    }
+    return ds;
+}
+
 // y = sum_k diag_k (x) rot_k(x), BSGS factored.
-static CtPair bsgs(const CtPair& in, const std::vector<std::vector<double>>& D,
-                   double dscale, Ctx& c, const Level& L,
+static CtPair bsgs(const CtPair& in, const DiagSet& D,
+                   Ctx& c, const Level& L,
                    std::map<uint32_t, gpufhe::KeySwitchConstants>& rk) {
     size_t T = (size_t)L.tw * c.n;
     std::vector<CtPair> B(BS_N1);
@@ -205,20 +231,9 @@ static CtPair bsgs(const CtPair& in, const std::vector<std::vector<double>>& D,
         CtPair inner; bool any = false;
         for (int b = 0; b < BS_N1; b++) {
             int k = shift + b;
-            bool nz = false;
-            for (int i = 0; i < SLOTS; i++) if (D[k][i] != 0.0) { nz = true; break; }
-            if (!nz) continue;
-            std::vector<double> dp(PER);
-            for (int i = 0; i < (int)PER; i++) {
-                int t = i - shift; if (t < 0) t += SLOTS;
-                dp[i] = D[k][t];
-            }
-            std::vector<int64_t> md;
-            gpufhe::encode_host(md, repl(dp), c.n, dscale);
-            std::vector<uint64_t> ev;
-            gpufhe::pt_to_eval_host(ev, md, L.tw, c.n, L.mod, L.root);
+            if (D.ev[k].empty()) continue;
             CtPair p = B[b];
-            gpufhe::ct_mul_pt_host(p.c0, p.c1, ev, L.tw, c.n, L.mod);
+            gpufhe::ct_mul_pt_host(p.c0, p.c1, D.ev[k], L.tw, c.n, L.mod);
             if (!any) { inner = p; any = true; }
             else gpufhe::ct_add_ct_host(inner.c0, inner.c1, p.c0, p.c1, L.tw, c.n, L.mod);
         }
@@ -273,6 +288,10 @@ static std::vector<double> decrypt_slots(const CtPair& ct, Ctx& c,
 int main(int argc, char** argv) {
     int stage = (argc > 1) ? std::atoi(argv[1]) : 3;
     int nimg  = (argc > 2) ? std::atoi(argv[2]) : 1;
+    if (argc > 3) { N = (uint32_t)std::atoi(argv[3]); SL = N / 2; }
+    if (N < 2 * PER) { std::printf("ring too small for period %u\n", PER); return 2; }
+    std::printf("ring n=%u  slots=%u  period=%u  log2(QP)=%u\n",
+                N, SL, PER, SIZEQ * 50 + SIZEP * 51);
 
     MLP m;
     if (!mlp_load(m, "models/mlp.txt")) { std::printf("run train_mlp first\n"); return 2; }
@@ -316,13 +335,22 @@ int main(int argc, char** argv) {
     cudaMalloc(&dr0, TMAX*8); cudaMalloc(&dr1, TMAX*8);
     cudaMalloc(&scr, (size_t)c.n*8); cudaMalloc(&drp, (size_t)c.n*8);
 
-    auto D1 = build_diagonals(build_matrix(m.W1, m.hidden, m.features));
-    auto D2 = build_diagonals(build_matrix(m.W2, m.classes, m.hidden));
+    auto D1r = build_diagonals(build_matrix(m.W1, m.hidden, m.features));
+    auto D2r = build_diagonals(build_matrix(m.W2, m.classes, m.hidden));
     std::vector<double> b1v(PER, 0.0), b2v(PER, 0.0);
     for (int h = 0; h < m.hidden; h++)  b1v[h] = m.b1[h];
     for (int q = 0; q < m.classes; q++) b2v[q] = m.b2[q];
 
     const double D50 = std::pow(2.0, 50), D40 = std::pow(2.0, 40);
+
+    // ONE-TIME: encode diagonals. O(n^2) per diagonal, so this dominated the
+    // per-image cost at n=16384 until it was hoisted out of the loop.
+    t0 = clk::now();
+    DiagSet E1 = encode_diags(D1r, D50, c, L5);
+    DiagSet E2;
+    if (stage >= 3) E2 = encode_diags(D2r, D40, c, L3);
+    std::printf("diagonal encode  %.0f ms (one-time, model constants)\n\n", ms(t0));
+
     double worst = 0; int agree = 0, correct = 0;
 
     for (int img = 0; img < nimg; img++) {
@@ -334,7 +362,7 @@ int main(int argc, char** argv) {
                              c.mod, c.root, NS, SIGMA, 909 + img);
 
         auto tinf = clk::now();
-        ct = bsgs(ct, D1, D50, c, L5, rk5);
+        ct = bsgs(ct, E1, c, L5, rk5);
         rescale(ct, c, L5, C5, dr0, dr1, scr, drp);         // -> tw 4, scale 2^50
         add_pt(ct, b1v, D50, c, L4);
 
@@ -346,7 +374,7 @@ int main(int argc, char** argv) {
             rescale(ct, c, L4, C4, dr0, dr1, scr, drp);     // -> tw 3, scale 2^50
             if (stage == 2) got = decrypt_slots(ct, c, L3, D50);
             else {
-                ct = bsgs(ct, D2, D40, c, L3, rk3);         // scale 2^90
+                ct = bsgs(ct, E2, c, L3, rk3);              // scale 2^90
                 rescale(ct, c, L3, C3, dr0, dr1, scr, drp); // -> tw 2, scale 2^40
                 add_pt(ct, b2v, D40, c, L2);
                 got = decrypt_slots(ct, c, L2, D40);

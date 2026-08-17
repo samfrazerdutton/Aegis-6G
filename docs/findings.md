@@ -36,3 +36,47 @@ The premise that a high-bandwidth 6G link is the enabling factor for
 encrypted multi-agent inference. It is not. FHE compute dominates by
 3+ orders of magnitude, and where transport does cost anything, the cost
 is local symmetric crypto rather than the link.
+
+## F2 — Encrypted inference at 128-bit-plus security is practical on a
+##      6 GB consumer GPU.
+
+Model: 196 -> 64 -> 10 MLP, square activation, 97.15% plaintext test accuracy.
+Circuit: BSGS matvec -> square (tensor+relin) -> BSGS matvec. 3 levels, no
+bootstrapping. Hardware: RTX 2060 Max-Q (6 GB), WSL2.
+
+Security from tools/lwe_security.py (primal-uSVP, BDGL16), re-validated
+in-session against the HES 2018 128-bit table. log2(QP) = 352
+(sizeQ=5 x 50-bit, sizeP=2 x 51-bit), uniform ternary secret.
+
+| ring   | classical | quantum | per image | worst logit err |
+|--------|-----------|---------|-----------|-----------------|
+| 1024   |  44.3     |  43.0   |  0.39 s   | 1.5e-08         |
+| 16384  | 163.1     | 151.2   |  4.8 s    | 4.8e-07         |
+
+n=8192 gives only 77.7 bits, so n=16384 is the SMALLEST secure ring here --
+4.8 s is the cost of security, not a conservative choice.
+Argmax agreement with the plaintext model: 3/3 at n=16384, 20/20 at n=1024.
+One-time per model: keys 4.0 s, diagonal encoding 223 s.
+
+### The optimisation that mattered
+Per-image cost at n=16384 was initially 240 s -- 160x the n=1024 time for a
+16x ring. Superlinear scaling localised it immediately: encode_host is O(N^2)
+and the BSGS re-encoded all 256 plaintext diagonals per image. Diagonals are
+model constants, so encoding belongs in setup. Hoisting gave 50x with
+BIT-IDENTICAL output (4.849e-07 before and after), which is what distinguishes
+a correctness-preserving speedup from a different computation that happens
+to pass.
+
+### Remaining levers (measured, not speculative)
+1. Rotations use the host-orchestrated keyswitch path; the library's fully
+   device-resident path measured 1.58x faster at n=8192 and is unused here.
+2. encode_host is O(N^2); an FFT encode would cut the 223 s setup to seconds.
+3. Batching 32 images across 8192 slots would amortise per-image cost, but
+   naive block packing breaks under cyclic rotation -- needs masking or
+   block-aligned rotations, which cost a level.
+
+### Contrast with bootstrapping
+Bootstrapping needs log2(QP) ~ 2050, forcing n=131072 and far more than 6 GB.
+A 3-level inference circuit needs 352 bits and fits comfortably. Shallow
+encrypted inference is deployable on consumer hardware today; bootstrapped
+FHE is not.
