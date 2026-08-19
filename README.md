@@ -16,6 +16,7 @@ its specification and gated against external test vectors where they exist.
 | Network cost characterisation | **Done — see `docs/findings.md`** |
 | GPU CKKS engine | Provided by [GPU-Resident-Library](https://github.com/samfrazerdutton/GPU-Resident-Library) (submodule) |
 | Encrypted MNIST inference | **Done — 2.5 s/image at 163-bit security, matches plaintext decisions** |
+| End-to-end client/server demo | **Done — blind evaluation over an ML-KEM session** |
 
 ## Headline results
 
@@ -54,6 +55,23 @@ before drawing any conclusion from the word "quantum-resistant":
 - The CKKS parameters used in tests are sandbox parameters at roughly
   44-bit security. A 128-bit-secure configuration needs a far larger ring.
 
+## Try it
+
+The end-to-end demo: a client encrypts an MNIST digit, ships it over a
+post-quantum channel, a server evaluates the neural network **without
+decrypting anything**, and returns encrypted logits the client decrypts.
+
+    ./tools/fetch_mnist.sh
+    ./tools/build_gpufhe.sh                 # needs CUDA
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build -j4
+    ./build/train_mlp 20 0.03               # ~97.1% test accuracy
+    ./build/aegis_demo 3 1024
+
+The server holds the model weights and never sees the secret key, the image,
+or the logits. The client holds the secret key and never sees the weights.
+Decrypted predictions match the plaintext model exactly.
+
 ## Build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
@@ -62,6 +80,16 @@ Optional data fetches (not needed for `ctest`, which ships its vectors):
 ./tools/fetch_kat.sh && ./tools/extract_kat.py # NIST ACVP ML-KEM vectors
 ./tools/fetch_mnist.sh # MNIST
 ./build/train_mlp 20 0.03 # trains to ~97.1%
+## Known limitations
+
+- **Not thread-safe.** GPU-Resident-Library keeps process-global caches
+  written without concurrency in mind; concurrent evaluation needs separate
+  processes. The demo forks.
+- **Key provisioning is expensive**: ~316 MB of evaluation keys at n=16384.
+  Provision once per client/server pair; do not re-handshake per inference.
+- **No peer authentication.** See docs/security.md.
+- The ML-KEM implementation is not constant-time.
+
 ## Testing philosophy
 
 Every layer is gated against an **external** oracle wherever one exists —
